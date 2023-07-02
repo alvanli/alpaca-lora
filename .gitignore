@@ -13,3 +13,5 @@ test_data.json
 todo.txt
 .venv
 .vscode
+*.json
+*.jsonl
