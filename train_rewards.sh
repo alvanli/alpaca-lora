@@ -1,11 +1,11 @@
-python3 finetune.py \
+accelerate launch finetune_rewards.py \
     --base_model='decapoda-research/llama-7b-hf' \
     --num_epochs=10 \
     --cutoff_len=512 \
     --group_by_length \
-    --output_dir='./lora-alpaca' \
+    --output_dir='./lora-alpaca-rewards' \
     --lora_target_modules='[q_proj,k_proj,v_proj,o_proj]' \
     --lora_r=16 \
-    --micro_batch_size=24 \
-    --data_path="./data/reddit_data_2.jsonl" \
+    --micro_batch_size=22 \
+    --data_path="./data/reddit_data_rewards.jsonl" \
     --learning_rate=0.0006

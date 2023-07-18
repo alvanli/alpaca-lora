@@ -63,18 +63,20 @@ if __name__ == "__main__":
                 continue 
 
             if curr_id in best_comments.keys():
-                for comment in best_comments[curr_id]:
-                    # if comment["score"] < 3:
-                    #     continue
+                post_text = line_json.get('title', '') + '\n' + line_json.get('selftext', '')
 
-                    post_text = line_json.get('title', '') + '\n' + line_json.get('selftext', '')
+                for _ in range(3):
+                    a, b = sorted(np.random.choice(range(len(best_comments[curr_id])), size=2))
+                    if a==b: continue
+                    comment_chosen = best_comments[curr_id][a]
+                    comment_rejected = best_comments[curr_id][b]
                     combined_json = {
                         "input": post_text,
                         "instruction": np.random.choice(INSTRUCTIONS),
-                        "output": comment["body"],
-                        "label": (int(comment["score"]//5) if np.abs(comment["score"]) < 25 else int(np.sign(comment["score"]) * 5)) + 5
+                        "chosen": comment_chosen,
+                        "rejected": comment_rejected
                     }
-                    nice_posts.append(combined_json)
+                    nice_posts.append(combined_json)                
 
     with open('./data/reddit_data_rewards.jsonl', 'w') as data_f:
         json.dump(nice_posts, data_f, indent=2)

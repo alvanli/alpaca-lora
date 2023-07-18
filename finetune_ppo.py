@@ -25,6 +25,8 @@ from peft import (
 )
 from transformers import Trainer, LlamaForCausalLM, LlamaTokenizer
 
+from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead, create_reference_model
+
 from utils.prompter import Prompter
 
 class SavePeftModelCallback(TrainerCallback):
@@ -40,16 +42,6 @@ class SavePeftModelCallback(TrainerCallback):
         if os.path.exists(pytorch_model_path):
             os.remove(pytorch_model_path)
         return control
-
-class RewardTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
-        rewards_j = model(input_ids=inputs["input_ids_j"],  attention_mask=inputs["attention_mask_j"])[0]
-        rewards_k = model(input_ids=inputs["input_ids_k"], attention_mask=inputs["attention_mask_k"])[0]
-        loss = -nn.functional.logsigmoid(rewards_j - rewards_k).mean()
-        if return_outputs:
-            return loss, {"rewards_j": rewards_j, "rewards_k": rewards_k}
-        return loss
-
 
 def train(
     # model/data params
@@ -142,6 +134,23 @@ def train(
         device_map=device_map,
     )
 
+    model = prepare_model_for_int8_training(model)
+
+    config = LoraConfig(
+        r=lora_r,
+        lora_alpha=lora_alpha,
+        target_modules=lora_target_modules,
+        lora_dropout=lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, config)
+
+    config = PPOConfig(
+        model_name="lvwerra/gpt2-imdb", steps=51200, learning_rate=1.41e-5, remove_unused_columns=False, log_with="wandb"
+    )
+
+
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
 
     tokenizer.pad_token_id = (
@@ -197,58 +206,41 @@ def train(
             ]  # could be sped up, probably
         return tokenized_full_prompt
 
-    model = prepare_model_for_int8_training(model)
-
-    config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=lora_target_modules,
-        lora_dropout=lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, config)
-
-    if data_path.endswith(".json") or data_path.endswith(".jsonl"):
-        data = load_dataset("json", data_files=data_path)
-    else:
-        data = load_dataset(data_path)
-
-    if resume_from_checkpoint:
-        # Check the available weights and load them
-        checkpoint_name = os.path.join(
-            resume_from_checkpoint, "pytorch_model.bin"
-        )  # Full checkpoint
-        if not os.path.exists(checkpoint_name):
-            checkpoint_name = os.path.join(
-                resume_from_checkpoint, "adapter_model.bin"
-            )  # only LoRA model - LoRA config above has to fit
-            resume_from_checkpoint = (
-                False  # So the trainer won't try loading its state
+    train_args = transformers.TrainingArguments(
+                per_device_train_batch_size=micro_batch_size,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                warmup_steps=100,
+                num_train_epochs=num_epochs,
+                learning_rate=learning_rate,
+                fp16=True,
+                logging_steps=10,
+                optim="adamw_torch",
+                evaluation_strategy="steps" if val_set_size > 0 else "no",
+                save_strategy="steps",
+                eval_steps=200 if val_set_size > 0 else None,
+                save_steps=200,
+                output_dir=output_dir,
+                save_total_limit=5,
+                load_best_model_at_end=True if val_set_size > 0 else False,
+                ddp_find_unused_parameters=False if ddp else None,
+                group_by_length=group_by_length,
+                report_to="wandb" if use_wandb else None,
+                run_name=wandb_run_name if use_wandb else None,
             )
-        # The two files above have a different name depending on how they were saved, but are actually the same.
-        if os.path.exists(checkpoint_name):
-            print(f"Restarting from {checkpoint_name}")
-            adapters_weights = torch.load(checkpoint_name)
-            set_peft_model_state_dict(model, adapters_weights)
-        else:
-            print(f"Checkpoint {checkpoint_name} not found")
+    
+    data = load_dataset("json", data_files=data_path)
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 
-    if val_set_size > 0:
-        train_val = data["train"].train_test_split(
-            test_size=val_set_size, shuffle=True, seed=42
-        )
-        train_data = (
-            train_val["train"].shuffle().map(generate_and_tokenize_prompt)
-        )
-        val_data = (
-            train_val["test"].shuffle().map(generate_and_tokenize_prompt)
-        )
-    else:
-        train_data = data["train"].shuffle().map(generate_and_tokenize_prompt)
-        val_data = None
+    train_val = data["train"].train_test_split(
+        test_size=val_set_size, shuffle=True, seed=42
+    )
+    train_data = (
+        train_val["train"].shuffle().map(generate_and_tokenize_prompt)
+    )
+    val_data = (
+        train_val["test"].shuffle().map(generate_and_tokenize_prompt)
+    )
 
     if not ddp and torch.cuda.device_count() > 1:
         # keeps Trainer from trying its own DataParallelism when more than 1 gpu is available
@@ -260,27 +252,7 @@ def train(
         train_dataset=train_data,
         eval_dataset=val_data,
         callbacks=[SavePeftModelCallback],
-        args=transformers.TrainingArguments(
-            per_device_train_batch_size=micro_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_steps=100,
-            num_train_epochs=num_epochs,
-            learning_rate=learning_rate,
-            fp16=True,
-            logging_steps=10,
-            optim="adamw_torch",
-            evaluation_strategy="steps" if val_set_size > 0 else "no",
-            save_strategy="steps",
-            eval_steps=200 if val_set_size > 0 else None,
-            save_steps=200,
-            output_dir=output_dir,
-            save_total_limit=5,
-            load_best_model_at_end=True if val_set_size > 0 else False,
-            ddp_find_unused_parameters=False if ddp else None,
-            group_by_length=group_by_length,
-            report_to="wandb" if use_wandb else None,
-            run_name=wandb_run_name if use_wandb else None,
-        ),
+        args=train_args,
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
@@ -297,13 +269,45 @@ def train(
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+
+    for epoch in range(2):
+        for batch in tqdm(ppo_trainer.dataloader):
+            (logs, game_data,) = (
+                dict(),
+                dict(),
+            )
+
+            #### prepend a random control token
+            task_list = choices(ctrl_str, k=config.batch_size)
+            game_data["query"] = [t + q for t, q in zip(task_list, batch["query"])]
+            query_tensors = [torch.cat((ctrl_tokens[t], input_ids)) for t, input_ids in zip(task_list, batch["input_ids"])]
+
+            #### get response from gpt2
+            response_tensors = []
+            for query in query_tensors:
+                response = ppo_trainer.generate(query, **generation_kwargs)
+                response_tensors.append(response.squeeze()[-txt_out_len:])
+            game_data["response"] = [gpt2_tokenizer.decode(r.squeeze()) for r in response_tensors]
+
+            #### sentiment analysis
+            texts = [q + r for q, r in zip(batch["query"], game_data["response"])]
+            logits = extract_pipe_output(sentiment_pipe(texts, **sentiment_pipe_kwargs))
+            rewards = pos_logit_to_reward(logits, task_list)
+
+            #### Run PPO training
+            t = time.time()
+            stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+
+            for cs in ctrl_str:
+                key = "env/reward_" + cs.strip("[]")
+                stats[key] = np.mean([r.cpu().numpy() for r, t in zip(rewards, task_list) if t == cs])
+            ppo_trainer.log_stats(stats, game_data, rewards)
+
+
 
     model.save_pretrained(output_dir)
 
-    print(
-        "\n If there's a warning about missing keys above, please disregard :)"
-    )
 
 
 if __name__ == "__main__":

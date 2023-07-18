@@ -1,4 +1,4 @@
-python3 finetune.py \
+python3 finetune_rlhf.py \
     --base_model='decapoda-research/llama-7b-hf' \
     --num_epochs=10 \
     --cutoff_len=512 \
