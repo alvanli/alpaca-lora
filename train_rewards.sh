@@ -8,4 +8,4 @@ accelerate launch finetune_rewards.py \
     --lora_r=16 \
     --micro_batch_size=22 \
     --data_path="./data/reddit_data_rewards.jsonl" \
-    --learning_rate=0.0006
+    --learning_rate=0.0002

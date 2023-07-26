@@ -205,8 +205,8 @@ def train(
                 optim="adamw_torch",
                 evaluation_strategy="steps" if val_set_size > 0 else "no",
                 save_strategy="steps",
-                eval_steps=200 if val_set_size > 0 else None,
-                save_steps=200,
+                eval_steps=50 if val_set_size > 0 else None,
+                save_steps=50,
                 output_dir=output_dir,
                 save_total_limit=5,
                 bf16=True,
@@ -247,7 +247,7 @@ def train(
         predictions, _ = eval_pred
         # Here, predictions is rewards_j and rewards_k.
         # We want to see how much of the time rewards_j > rewards_k.
-        predictions = np.argmax(predictions, axis=0)
+        predictions = np.argmax(predictions, axis=1)
         labels = np.zeros(predictions.shape)
         return accuracy.compute(predictions=predictions, references=labels)
 
